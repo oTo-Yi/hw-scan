@@ -146,6 +146,35 @@ nav button.on{color:var(--acc);font-weight:700}
   .label svg{width:100%;height:auto}
 }
 @page{size:A4;margin:8mm}
+
+/* ===== 日期选择器 ===== */
+.datesel{
+  width:100%;appearance:none;-webkit-appearance:none;
+  background:var(--chip);color:var(--fg);border:1px solid var(--line);
+  border-radius:11px;font-size:15px;font-weight:600;padding:11px 34px 11px 12px;
+  margin-bottom:9px;line-height:1.3;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238b98a5' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 12px center;
+}
+.datesel option{background:var(--card);color:var(--fg)}
+.datesel.viewhist{border-color:var(--gold);color:var(--gold)}
+
+/* ===== 学生行里的拍照按钮 ===== */
+.stu .photobtn{
+  flex:0 0 auto;width:42px;height:42px;border-radius:10px;font-size:20px;line-height:1;
+  background:var(--chip);border:1px solid var(--line);color:var(--fg);
+  display:flex;align-items:center;justify-content:center;
+}
+.stu .photobtn.has{background:var(--ok);border-color:var(--ok);color:#052e16}
+
+/* ===== 照片查看弹层 ===== */
+.phmodal{
+  position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.92);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px;
+}
+.phmodal img{max-width:100%;max-height:80vh;border-radius:10px;object-fit:contain;background:#000}
+.phbar{display:flex;align-items:center;gap:12px;color:#fff;font-size:15px}
+.phbar button{background:var(--acc);color:#fff;border:none;border-radius:10px;padding:10px 18px;font-size:15px;font-weight:600}
 </style>
 </head>
 <body>
@@ -154,6 +183,7 @@ nav button.on{color:var(--acc);font-weight:700}
     <h1>📚 作业扫码检查</h1>
     <span class="sub" id="dateSub"></span>
   </div>
+  <select id="dateSel" class="datesel" onchange="setView(this.value)"></select>
   <div id="clsbar"></div>
   <input id="jobName" type="text" autocomplete="off" placeholder="输入作业名，如：语文周测卷"
          oninput="onJobInput(this.value)">
@@ -164,6 +194,12 @@ nav button.on{color:var(--acc);font-weight:700}
 </header>
 
 <main><div id="page"></div></main>
+
+<input type="file" id="photoStu" accept="image/*" capture="environment" hidden onchange="onStuPhoto(this)">
+<div id="phmodal" class="phmodal hidden" onclick="closePhoto()">
+  <img id="phimg" alt="作业照片">
+  <div class="phbar"><span id="phlabel"></span><button onclick="event.stopPropagation();closePhoto()">关闭</button></div>
+</div>
 
 <nav>
   <button data-tab="scan" onclick="show('scan')"><span class="ic">📷</span>扫码</button>
@@ -184,11 +220,16 @@ const CLASSES = ['2404','2405'];
 const LS = 'hwcheck_v2';
 const FILTER_KEY = 'hwFilter_v2';
 const CAM_KEY = 'hwCam_v2';
+const PHOTO_FLAG_KEY = 'hwPhotoFlags_v2';
 
 let db = load();
 let tab = 'scan';
 let filter = localStorage.getItem(FILTER_KEY) || '全部';
 let camId = localStorage.getItem(CAM_KEY) || '';
+let viewId = null;           // null=本次(db.cur)，否则为历史记录 id
+let pendingPhotoSid = null;  // 待拍照的学生 sid
+let photoFlags = {};
+try{ photoFlags = JSON.parse(localStorage.getItem(PHOTO_FLAG_KEY) || '{}'); }catch(e){}
 let codeReader = null;
 let scanning = false;
 let videoTrack = null;
@@ -217,6 +258,130 @@ function load(){
 
 function save(){
   try{ localStorage.setItem(LS, JSON.stringify(db)); }catch(e){}
+}
+
+/* ===== 日期视图 ===== */
+function curRecord(){
+  if(!viewId) return db.cur;
+  const h = db.history.find(function(x){ return x.id === viewId; });
+  return h || db.cur;
+}
+function curRecordId(){
+  return viewId || 'cur';
+}
+function saveFlags(){
+  try{ localStorage.setItem(PHOTO_FLAG_KEY, JSON.stringify(photoFlags)); }catch(e){}
+}
+function renderDateSel(){
+  const sel = document.getElementById('dateSel');
+  if(!sel) return;
+  const opts = [];
+  opts.push('<option value="cur"'+ (viewId ? '' : ' selected') +'>🕐 本次 · ' + esc(db.cur.name || '未命名') + '（' + (db.cur.date || today()) + '）</option>');
+  db.history.slice().reverse().forEach(function(h){
+    opts.push('<option value="'+h.id+'"'+ (viewId === h.id ? ' selected' : '') +'>📚 ' + esc(h.name) + '（' + esc(h.date) + '）</option>');
+  });
+  sel.innerHTML = opts.join('');
+  sel.classList.toggle('viewhist', !!viewId);
+}
+function setView(id){
+  viewId = (id === 'cur' || id === '' || id == null) ? null : id;
+  render();
+}
+
+/* ===== 作业拍照（数据存 IndexedDB，标记存 localStorage）===== */
+let _idb = null;
+function idbOpen(){
+  return new Promise(function(resolve, reject){
+    if(_idb) return resolve(_idb);
+    if(!window.indexedDB){ reject(new Error('no idb')); return; }
+    let req;
+    try{ req = indexedDB.open('hwPhotoStore', 1); }catch(e){ reject(e); return; }
+    req.onupgradeneeded = function(){ try{ req.result.createObjectStore('p'); }catch(e){} };
+    req.onsuccess = function(){ _idb = req.result; resolve(_idb); };
+    req.onerror = function(){ reject(req.error); };
+  });
+}
+function photoPut(key, val){
+  return idbOpen().then(function(db){
+    return new Promise(function(resolve, reject){
+      const tx = db.transaction('p', 'readwrite');
+      tx.objectStore('p').put(val, key);
+      tx.oncomplete = function(){ resolve(); };
+      tx.onerror = function(){ reject(tx.error); };
+    });
+  });
+}
+function photoGet(key){
+  return idbOpen().then(function(db){
+    return new Promise(function(resolve){
+      const req = db.transaction('p', 'readonly').objectStore('p').get(key);
+      req.onsuccess = function(){ resolve(req.result || null); };
+      req.onerror = function(){ resolve(null); };
+    });
+  }).catch(function(){ return null; });
+}
+function compressImage(file, maxW, quality){
+  return new Promise(function(resolve, reject){
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = function(){
+      const s = Math.min(1, maxW / img.naturalWidth);
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.naturalWidth * s));
+      c.height = Math.max(1, Math.round(img.naturalHeight * s));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('load fail')); };
+    img.src = url;
+  });
+}
+function snapPhoto(sid){
+  pendingPhotoSid = sid;
+  const inp = document.getElementById('photoStu');
+  if(inp) inp.click();
+}
+function onStuPhoto(input){
+  const f = input.files && input.files[0];
+  input.value = '';
+  if(!f || !pendingPhotoSid) return;
+  const sid = pendingPhotoSid;
+  pendingPhotoSid = null;
+  const name = BYSID[sid] ? BYSID[sid].name : sid;
+  toast('拍照处理中…', 'dup', '');
+  compressImage(f, 1000, 0.6).then(function(dataURI){
+    const key = curRecordId() + '_' + sid;
+    return photoPut(key, dataURI).then(function(){
+      photoFlags[key] = 1;
+      saveFlags();
+      if(tab === 'list') refreshLists();
+      toast('已拍照存档', 'ok', name);
+    });
+  }).catch(function(){
+    toast('拍照失败', 'err', '请重试');
+  });
+}
+function photoAction(sid){
+  const key = curRecordId() + '_' + sid;
+  if(photoFlags[key]) viewPhoto(sid);
+  else snapPhoto(sid);
+}
+function viewPhoto(sid){
+  const key = curRecordId() + '_' + sid;
+  photoGet(key).then(function(d){
+    if(!d){ toast('还没有照片', 'dup', '点📷拍照'); return; }
+    const img = document.getElementById('phimg');
+    if(img) img.src = d;
+    const lb = document.getElementById('phlabel');
+    if(lb) lb.textContent = (BYSID[sid] ? BYSID[sid].name : sid) + ' 的作业照片';
+    const m = document.getElementById('phmodal');
+    if(m) m.classList.remove('hidden');
+  });
+}
+function closePhoto(){
+  const m = document.getElementById('phmodal');
+  if(m) m.classList.add('hidden');
 }
 
 function curRoster(){
@@ -306,18 +471,23 @@ function renderTop(){
     }).join('');
   }
   const jn = document.getElementById('jobName');
-  if(jn && document.activeElement !== jn){
-    const v = db.cur.name || '';
-    if(jn.value !== v) jn.value = v;
+  if(jn){
+    jn.disabled = !!viewId;
+    if(document.activeElement !== jn){
+      const v = db.cur.name || '';
+      if(jn.value !== v) jn.value = v;
+    }
   }
   const ds = document.getElementById('dateSub');
-  if(ds) ds.textContent = db.cur.date || today();
+  if(ds) ds.textContent = curRecord().date || today();
+  renderDateSel();
   updateProgress();
 }
 
 function updateProgress(){
   const scope = curRoster();
-  const done = scope.filter(function(s){ return db.cur.done[s.sid]; }).length;
+  const rec = curRecord();
+  const done = scope.filter(function(s){ return rec.done[s.sid]; }).length;
   const total = scope.length;
   const fill = document.getElementById('progressFill');
   if(fill) fill.style.width = total ? ((done/total)*100)+'%' : '0%';
@@ -734,8 +904,9 @@ function refreshLists(){
   const scope = curRoster().filter(function(s){
     return !q || s.name.toLowerCase().indexOf(q) >= 0 || s.sid.indexOf(q) >= 0;
   });
-  const miss = scope.filter(function(s){ return !db.cur.done[s.sid]; });
-  const done = scope.filter(function(s){ return db.cur.done[s.sid]; });
+  const rec = curRecord();
+  const miss = scope.filter(function(s){ return !rec.done[s.sid]; });
+  const done = scope.filter(function(s){ return rec.done[s.sid]; });
   const sum = document.getElementById('sumRow');
   if(sum) sum.textContent = (filter === '全部' ? '两班' : filter+'班') + ' · 共 '+scope.length+' 人';
   const mc = document.getElementById('missCount');
@@ -762,21 +933,36 @@ function buildStuList(list, isDone){
 }
 
 function stuRow(s, isDone){
-  const d = db.cur.done[s.sid];
-  return '<div class="stu '+(isDone ? 'done' : 'todo')+'" onclick="toggleStu(\''+s.sid+'\')">' +
+  const rec = curRecord();
+  const d = rec.done[s.sid];
+  const readOnly = !!viewId;
+  const hasPhoto = !!photoFlags[curRecordId()+'_'+s.sid];
+  let phBtn = '';
+  if(isDone){
+    if(readOnly){
+      if(hasPhoto) phBtn = '<button class="photobtn has" onclick="event.stopPropagation();viewPhoto(\''+s.sid+'\')">🖼</button>';
+    }else{
+      phBtn = '<button class="photobtn'+(hasPhoto?' has':'')+'" onclick="event.stopPropagation();photoAction(\''+s.sid+'\')">📷</button>';
+    }
+  }
+  const rowAction = readOnly ? '' : ' onclick="toggleStu(\''+s.sid+'\')"';
+  return '<div class="stu '+(isDone ? 'done' : 'todo')+'"'+rowAction+'>' +
     '<div class="nm">'+esc(s.name)+'<span class="sid">'+s.sid+'</span></div>' +
-    '<div class="time">'+(isDone ? (hm(d)+'<br>点击撤销') : '点击补勾')+'</div>' +
+    '<div class="time">'+(isDone ? (hm(d)+'<br>'+(readOnly?'已交':'点击撤销')) : (readOnly?'':'点击补勾'))+'</div>' +
+    phBtn +
     '<div class="badge">'+(isDone ? '已交' : '欠交')+'</div></div>';
 }
 
 function toggleStu(sid){
-  if(db.cur.done[sid]) delete db.cur.done[sid];
-  else db.cur.done[sid] = Date.now();
+  if(viewId) return; // 历史记录只读
+  const rec = db.cur;
+  if(rec.done[sid]) delete rec.done[sid];
+  else rec.done[sid] = Date.now();
   save();
   updateProgress();
   refreshLists();
   const s = BYSID[sid];
-  toast(esc(s ? s.name : sid), db.cur.done[sid] ? 'ok' : 'dup', db.cur.done[sid] ? '已补勾' : '已撤销');
+  toast(esc(s ? s.name : sid), rec.done[sid] ? 'ok' : 'dup', rec.done[sid] ? '已补勾' : '已撤销');
 }
 
 function missText(record, scope){
@@ -810,10 +996,10 @@ function allText(record, scope){
 }
 
 function copyMiss(){
-  copyText(missText(db.cur, curRoster()).join('\n'), '欠交名单已复制');
+  copyText(missText(curRecord(), curRoster()).join('\n'), '欠交名单已复制');
 }
 function copyAll(){
-  copyText(allText(db.cur, curRoster()).join('\n'), '全部名单已复制');
+  copyText(allText(curRecord(), curRoster()).join('\n'), '全部名单已复制');
 }
 
 function copyText(text, okMsg){
@@ -871,7 +1057,8 @@ function csvName(record, scopeLabel){
 }
 
 function dlCsv(){
-  downloadFile(csvFor(db.cur, curRoster()), csvName(db.cur, filter === '全部' ? '两班' : filter), 'text/csv');
+  const rec = curRecord();
+  downloadFile(csvFor(rec, curRoster()), csvName(rec, filter === '全部' ? '两班' : filter), 'text/csv');
 }
 
 function exportCurrentCsv(){
@@ -967,13 +1154,21 @@ function saveCurrent(){
     toast('请先输入作业名', 'err', '在顶部填写本次作业名称');
     return;
   }
+  const hid = 'h' + Date.now();
   db.history.push({
-    id: 'h' + Date.now(),
+    id: hid,
     name: db.cur.name,
     date: db.cur.date || today(),
     done: Object.assign({}, db.cur.done),
     ts: Date.now()
   });
+  // 快照本次的照片标记与数据到历史记录
+  Object.keys(db.cur.done).forEach(function(sid){
+    const ck = 'cur_' + sid, nk = hid + '_' + sid;
+    if(photoFlags[ck]) photoFlags[nk] = 1;
+    photoGet(ck).then(function(d){ if(d) photoPut(nk, d); });
+  });
+  saveFlags();
   save();
   renderHistList();
   toast('已保存', 'ok', db.cur.name);
@@ -982,6 +1177,10 @@ function saveCurrent(){
 function resetCurrent(){
   if((Object.keys(db.cur.done).length || db.cur.name) &&
      !confirm('确定清空本次勾选并开始新作业？（已保存的历史不受影响）')) return;
+  // 清空本次照片标记
+  Object.keys(photoFlags).forEach(function(k){ if(k.indexOf('cur_') === 0) delete photoFlags[k]; });
+  saveFlags();
+  viewId = null;
   db.cur = {name:'', date: today(), done:{}};
   save();
   render();
@@ -991,6 +1190,7 @@ function resetCurrent(){
 function delHist(id){
   if(!confirm('确定删除这条历史记录？')) return;
   db.history = db.history.filter(function(h){ return h.id !== id; });
+  if(viewId === id) viewId = null;
   save();
   renderHistList();
   toast('已删除', 'dup', '');
