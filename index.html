@@ -175,6 +175,8 @@ nav button.on{color:var(--acc);font-weight:700}
 .phmodal img{max-width:100%;max-height:80vh;border-radius:10px;object-fit:contain;background:#000}
 .phbar{display:flex;align-items:center;gap:12px;color:#fff;font-size:15px}
 .phbar button{background:var(--acc);color:#fff;border:none;border-radius:10px;padding:10px 18px;font-size:15px;font-weight:600}
+.phbar .shutter{background:var(--ok);color:#052e16;font-weight:700}
+.phmodal video{max-width:100%;max-height:70vh;border-radius:10px;background:#000}
 </style>
 </head>
 <body>
@@ -195,10 +197,17 @@ nav button.on{color:var(--acc);font-weight:700}
 
 <main><div id="page"></div></main>
 
-<input type="file" id="photoStu" accept="image/*" capture="environment" hidden onchange="onStuPhoto(this)">
 <div id="phmodal" class="phmodal hidden" onclick="closePhoto()">
   <img id="phimg" alt="作业照片">
   <div class="phbar"><span id="phlabel"></span><button onclick="event.stopPropagation();closePhoto()">关闭</button></div>
+</div>
+<div id="cammodal" class="phmodal hidden">
+  <video id="camvideo" playsinline muted autoplay></video>
+  <div class="phbar">
+    <button onclick="cancelCam()">取消</button>
+    <span id="camlabel"></span>
+    <button class="shutter" onclick="doCapture()">📸 拍照</button>
+  </div>
 </div>
 
 <nav>
@@ -228,6 +237,7 @@ let filter = localStorage.getItem(FILTER_KEY) || '全部';
 let camId = localStorage.getItem(CAM_KEY) || '';
 let viewId = null;           // null=本次(db.cur)，否则为历史记录 id
 let pendingPhotoSid = null;  // 待拍照的学生 sid
+let camStream = null;        // 应用内拍照的摄像头流
 let photoFlags = {};
 try{ photoFlags = JSON.parse(localStorage.getItem(PHOTO_FLAG_KEY) || '{}'); }catch(e){}
 let codeReader = null;
@@ -320,52 +330,62 @@ function photoGet(key){
     });
   }).catch(function(){ return null; });
 }
-function compressImage(file, maxW, quality){
-  return new Promise(function(resolve, reject){
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = function(){
-      const s = Math.min(1, maxW / img.naturalWidth);
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(img.naturalWidth * s));
-      c.height = Math.max(1, Math.round(img.naturalHeight * s));
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      resolve(c.toDataURL('image/jpeg', quality));
-    };
-    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('load fail')); };
-    img.src = url;
-  });
-}
-function snapPhoto(sid){
+function openCam(sid){
   pendingPhotoSid = sid;
-  const inp = document.getElementById('photoStu');
-  if(inp) inp.click();
-}
-function onStuPhoto(input){
-  const f = input.files && input.files[0];
-  input.value = '';
-  if(!f || !pendingPhotoSid) return;
-  const sid = pendingPhotoSid;
-  pendingPhotoSid = null;
-  const name = BYSID[sid] ? BYSID[sid].name : sid;
-  toast('拍照处理中…', 'dup', '');
-  compressImage(f, 1000, 0.6).then(function(dataURI){
-    const key = curRecordId() + '_' + sid;
-    return photoPut(key, dataURI).then(function(){
-      photoFlags[key] = 1;
-      saveFlags();
-      if(tab === 'list') refreshLists();
-      toast('已拍照存档', 'ok', name);
+  const m = document.getElementById('cammodal');
+  const v = document.getElementById('camvideo');
+  const lb = document.getElementById('camlabel');
+  if(lb) lb.textContent = (BYSID[sid] ? BYSID[sid].name : sid) + ' 的作业';
+  if(m) m.classList.remove('hidden');
+  if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+    cancelCam();
+    toast('摄像头不可用', 'err', '请用系统浏览器打开');
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}}, audio:false})
+    .then(function(s){
+      camStream = s;
+      v.srcObject = s;
+      v.play().catch(function(){});
+    })
+    .catch(function(){
+      cancelCam();
+      toast('无法打开摄像头', 'err', '请允许相机权限');
     });
+}
+function cancelCam(){
+  if(camStream){ try{ camStream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){} camStream = null; }
+  const v = document.getElementById('camvideo'); if(v) v.srcObject = null;
+  const m = document.getElementById('cammodal'); if(m) m.classList.add('hidden');
+  pendingPhotoSid = null;
+}
+function doCapture(){
+  const v = document.getElementById('camvideo');
+  if(!v || !pendingPhotoSid || !v.videoWidth){ toast('画面还没就绪', 'dup', '稍等再拍'); return; }
+  const sid = pendingPhotoSid;
+  const maxW = 1000;
+  const s = Math.min(1, maxW / v.videoWidth);
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(v.videoWidth * s));
+  c.height = Math.max(1, Math.round(v.videoHeight * s));
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  const dataURI = c.toDataURL('image/jpeg', 0.6);
+  const name = BYSID[sid] ? BYSID[sid].name : sid;
+  cancelCam();
+  const key = curRecordId() + '_' + sid;
+  photoPut(key, dataURI).then(function(){
+    photoFlags[key] = 1;
+    saveFlags();
+    if(tab === 'list') refreshLists();
+    toast('已拍照存档', 'ok', name);
   }).catch(function(){
-    toast('拍照失败', 'err', '请重试');
+    toast('保存失败', 'err', '请重试');
   });
 }
 function photoAction(sid){
   const key = curRecordId() + '_' + sid;
   if(photoFlags[key]) viewPhoto(sid);
-  else snapPhoto(sid);
+  else openCam(sid);
 }
 function viewPhoto(sid){
   const key = curRecordId() + '_' + sid;
@@ -939,10 +959,10 @@ function stuRow(s, isDone){
   const hasPhoto = !!photoFlags[curRecordId()+'_'+s.sid];
   let phBtn = '';
   if(isDone){
-    if(readOnly){
-      if(hasPhoto) phBtn = '<button class="photobtn has" onclick="event.stopPropagation();viewPhoto(\''+s.sid+'\')">🖼</button>';
-    }else{
-      phBtn = '<button class="photobtn'+(hasPhoto?' has':'')+'" onclick="event.stopPropagation();photoAction(\''+s.sid+'\')">📷</button>';
+    if(hasPhoto){
+      phBtn = '<button class="photobtn has" onclick="event.stopPropagation();viewPhoto(\''+s.sid+'\')" title="查看照片">🖼</button>';
+    }else if(!readOnly){
+      phBtn = '<button class="photobtn" onclick="event.stopPropagation();openCam(\''+s.sid+'\')" title="拍照存档">📷</button>';
     }
   }
   const rowAction = readOnly ? '' : ' onclick="toggleStu(\''+s.sid+'\')"';
