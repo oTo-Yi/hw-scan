@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>词汇竞答 · 遥控端</title>
+<style>
+:root{--bg:#0f141a;--card:#1a222b;--line:#2a3542;--fg:#eef3f7;--dim:#8b98a5;--acc:#3b82f6;--ok:#22c55e;--warn:#ef4444;--gold:#f59e0b}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;padding:16px;max-width:520px;margin:0 auto;min-height:100vh}
+h1{font-size:20px;text-align:center;margin:10px 0 16px}
+.sub{text-align:center;color:var(--dim);font-size:12px;margin:-10px 0 16px}
+.clsrow{display:flex;gap:10px;margin-bottom:16px}
+.clsrow .cls{flex:1;padding:13px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);font-size:16px;font-weight:700;cursor:pointer}
+.clsrow .cls.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.cmd{padding:18px 10px;border-radius:14px;border:1px solid var(--line);background:var(--card);color:var(--fg);font-size:17px;font-weight:700;cursor:pointer;min-height:64px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
+.cmd:active{transform:scale(.97)}
+.cmd small{font-size:11px;color:var(--dim);font-weight:400}
+.cmd.next{background:var(--acc);border-color:var(--acc);color:#fff}
+.cmd.next small{color:#cfe4ff}
+.cmd.reveal{background:var(--gold);border-color:var(--gold);color:#3b2300}
+.cmd.reveal small{color:#5c3a00}
+.cmd.danger{background:var(--warn);border-color:var(--warn);color:#fff}
+.cmd.danger small{color:#ffd6d6}
+#status{margin-top:18px;padding:14px;border-radius:12px;background:var(--card);border:1px solid var(--line);font-size:14px;color:var(--dim);min-height:48px;line-height:1.5;word-break:break-all}
+#status.ok{color:var(--ok);border-color:var(--ok)}
+#status.err{color:var(--warn);border-color:var(--warn)}
+.foot{margin-top:16px;text-align:center;color:var(--dim);font-size:12px;line-height:1.7}
+</style>
+</head>
+<body>
+<h1>🎮 词汇竞答 · 遥控端</h1>
+<div class="sub">控制教室大屏上的竞答游戏 · 约2秒生效</div>
+
+<div class="clsrow">
+  <button class="cls" id="c2404" onclick="setCls('2404')">2404班</button>
+  <button class="cls" id="c2405" onclick="setCls('2405')">2405班</button>
+</div>
+
+<div class="grid">
+  <button class="cmd" onclick="send('start')">🎬<small>开始答题</small></button>
+  <button class="cmd next" onclick="send('next')">⏭️<small>下一题</small></button>
+  <button class="cmd reveal" onclick="send('reveal')">🔍<small>显示答案</small></button>
+  <button class="cmd" onclick="send('result')">🏁<small>查看结果</small></button>
+  <button class="cmd danger" onclick="send('restart')">🔄<small>重开一局</small></button>
+  <button class="cmd" onclick="send('back')">🏫<small>返回点名</small></button>
+</div>
+
+<div id="status">就绪。选择班级后点按钮即可遥控教室大屏。</div>
+
+<div class="foot">
+  提示：教室大屏打开对应班的页面后<b>不要再碰它</b>，全程用这里控制。<br>
+  每点一下约 2 秒后大屏生效；连点请稍等。
+</div>
+
+<script>
+var TOPICS = {'2404':'dshquiz2404-28cb50fef6', '2405':'dshquiz2405-0996be93ce'};
+var cls = localStorage.getItem('quizCls') || '2405';
+var busy = false;
+
+function setCls(c){
+  cls = c;
+  localStorage.setItem('quizCls', c);
+  document.getElementById('c2404').classList.toggle('on', c === '2404');
+  document.getElementById('c2405').classList.toggle('on', c === '2405');
+  setStatus('已切到 ' + c + ' 班', '');
+}
+
+function setStatus(msg, kind){
+  var s = document.getElementById('status');
+  s.textContent = msg;
+  s.className = kind === 'ok' ? 'ok' : (kind === 'err' ? 'err' : '');
+}
+
+function label(cmd){
+  return {'start':'开始答题','next':'下一题','reveal':'显示答案','result':'查看结果','restart':'重开一局','back':'返回点名'}[cmd] || cmd;
+}
+
+function send(cmd){
+  if(busy) return;
+  busy = true;
+  setStatus('正在发送「'+label(cmd)+'」…', '');
+  fetch('https://ntfy.sh/' + TOPICS[cls], {
+    method: 'POST',
+    body: JSON.stringify({cmd: cmd, ts: Date.now()})
+  }).then(function(r){
+    if(r.ok){ setStatus('✓ 已发送「'+label(cmd)+'」(' + cls + '班)，大屏约2秒后响应', 'ok'); }
+    else { setStatus('✗ 发送失败：HTTP ' + r.status, 'err'); }
+  }).catch(function(e){
+    setStatus('✗ 发送失败：' + e.message + '（请检查网络后重试）', 'err');
+  }).then(function(){ busy = false; });
+}
+
+setCls(cls);
+</script>
+</body>
+</html>
