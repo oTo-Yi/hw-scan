@@ -5410,7 +5410,8 @@ window.GAOKAO_SAMPLE = "data:audio/mpeg;base64,SUQzBAAAAAABIVRYWFgAAAASAAADbWFqb
 })();
 </script>
 
-<!-- ═══════ 遥控接收器：轮询 ntfy.sh 话题，远程控制答题 ═══════ -->
+
+<!-- ═══════ 遥控接收器：轮询 ntfy.sh 话题，远程控制答题 + 自动刷新 ═══════ -->
 <script>
 (function(){
   var TOPICS = {'2404':'dshquiz2404-28cb50fef6', '2405':'dshquiz2405-0996be93ce'};
@@ -5460,6 +5461,10 @@ window.GAOKAO_SAMPLE = "data:audio/mpeg;base64,SUQzBAAAAAABIVRYWFgAAAASAAADbWFqb
       }
       else if(cmd === 'back'){ backToRollcall(); }
       else if(cmd === 'start'){ beginQuiz(); }
+      else if(cmd === 'reload'){
+        var u = location.href.split('?')[0].split('#')[0];
+        location.href = u + '?v=' + Date.now();
+      }
     }catch(e){}
   }
 
